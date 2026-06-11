@@ -217,6 +217,12 @@ start_cluster 3 3 {tags {logreqres:skip external:skip cluster} overrides {cluste
         assert_error "*Slots are not served by this node*" {R 2 CLUSTER MIGRATESLOTS SLOTSRANGE 0 0 NODE $node0_id}
         assert_error "*Target node can not be this node*" {R 0 CLUSTER MIGRATESLOTS SLOTSRANGE 0 0 NODE $node0_id}
 
+        assert_error "*syntax error*" {R 0 CLUSTER MIGRATESLOTS AUTH SLOTSRANGE 0 0 NODE $node1_id}
+        assert_error "*syntax error*" {R 0 CLUSTER MIGRATESLOTS SLOTSRANGE 0 0 NODE $node1_id AUTH}
+        assert_error "*syntax error*" {R 0 CLUSTER MIGRATESLOTS SLOTSRANGE 0 0 NODE $node1_id AUTH2}
+        assert_error "*syntax error*" {R 0 CLUSTER MIGRATESLOTS SLOTSRANGE 0 0 NODE $node1_id AUTH2 user}
+        assert_error "*syntax error*" {R 0 CLUSTER MIGRATESLOTS AUTH2 SLOTSRANGE 0 0 NODE $node1_id}
+
         assert_error "*wrong number of arguments*" {R 0 CLUSTER CANCELSLOTMIGRATIONS ARG}
         assert_error "*No migrations ongoing*" {R 0 CLUSTER CANCELSLOTMIGRATIONS}
     }
@@ -1746,6 +1752,81 @@ start_cluster 3 3 {tags {logreqres:skip external:skip cluster} overrides {cluste
             # Cleanup for next test
             R 0 CONFIG SET requirepass ""
             R 2 CONFIG SET primaryauth ""
+        }
+    }
+
+    test "Import with per-job AUTH password" {
+        assert_does_not_resync {
+            R 0 CONFIG SET requirepass "mypassword"
+
+            # Populate data before migration
+            populate 1000 "$16383_slot_tag:" 1000 -2
+
+            # Use AUTH on the command line instead of primaryauth
+            assert_match "OK" [R 2 CLUSTER MIGRATESLOTS SLOTSRANGE 16383 16383 NODE $node0_id AUTH mypassword]
+            set jobname [get_job_name 2 16383]
+            wait_for_migration 0 16383
+
+            # Keys successfully migrated
+            assert_match "1000" [R 0 CLUSTER COUNTKEYSINSLOT 16383]
+            assert_match "0" [R 2 CLUSTER COUNTKEYSINSLOT 16383]
+
+            # Migration log shows success on both ends
+            assert {[dict get [get_migration_by_name 0 $jobname] state] eq "success"}
+            assert {[dict get [get_migration_by_name 2 $jobname] state] eq "success"}
+
+            # Cleanup for next test
+            assert_match "OK" [R 0 FLUSHDB SYNC]
+            assert_match "OK" [R 0 CLUSTER MIGRATESLOTS SLOTSRANGE 16383 16383 NODE $node2_id]
+            wait_for_migration 2 16383
+            R 0 CONFIG SET requirepass ""
+        }
+    }
+
+    test "Import with per-job AUTH2 username password" {
+        assert_does_not_resync {
+            R 0 CONFIG SET requirepass "mypassword"
+            R 0 ACL SETUSER testuser on >mypassword +@all
+
+            # Populate data before migration
+            populate 1000 "$16383_slot_tag:" 1000 -2
+
+            # Use AUTH2 on the command line
+            assert_match "OK" [R 2 CLUSTER MIGRATESLOTS SLOTSRANGE 16383 16383 NODE $node0_id AUTH2 testuser mypassword]
+            set jobname [get_job_name 2 16383]
+            wait_for_migration 0 16383
+
+            # Keys successfully migrated
+            assert_match "1000" [R 0 CLUSTER COUNTKEYSINSLOT 16383]
+            assert_match "0" [R 2 CLUSTER COUNTKEYSINSLOT 16383]
+
+            # Migration log shows success on both ends
+            assert {[dict get [get_migration_by_name 0 $jobname] state] eq "success"}
+            assert {[dict get [get_migration_by_name 2 $jobname] state] eq "success"}
+
+            # Cleanup for next test
+            R 0 ACL DELUSER testuser
+            assert_match "OK" [R 0 FLUSHDB SYNC]
+            assert_match "OK" [R 0 CLUSTER MIGRATESLOTS SLOTSRANGE 16383 16383 NODE $node2_id]
+            wait_for_migration 2 16383
+            R 0 CONFIG SET requirepass ""
+        }
+    }
+
+    test "Import with per-job AUTH wrong password" {
+        assert_does_not_resync {
+            R 0 CONFIG SET requirepass "correctpassword"
+
+            # Use wrong password on the command line
+            assert_match "OK" [R 2 CLUSTER MIGRATESLOTS SLOTSRANGE 16383 16383 NODE $node0_id AUTH wrongpassword]
+            set jobname [get_job_name 2 16383]
+
+            # Should be denied
+            wait_for_migration_field 2 $jobname state failed
+            assert_match {*Failed to AUTH to target node*} [dict get [get_migration_by_name 2 $jobname] message]
+
+            # Cleanup for next test
+            R 0 CONFIG SET requirepass ""
         }
     }
 
